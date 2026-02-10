@@ -33,4 +33,15 @@ final class PacketizerTests: XCTestCase {
         XCTAssertEqual(third[2], 0x90)
         XCTAssertEqual(third[4], 0x32)
     }
+
+    func testPacketizationRespectsCustomChunkSize() {
+        let payload = Data(repeating: 0x11, count: 280)
+        let packets = HiPrintPacketizer.packetize(payload: payload, maxDataBytes: 137)
+
+        XCTAssertEqual(packets.count, 1 + 3)
+        XCTAssertEqual(packets[1][4], 137)
+        XCTAssertEqual(packets[2][4], 137)
+        XCTAssertEqual(packets[3][4], 6)
+        XCTAssertEqual(packets[3][2], 0x12) // offset low byte: 274
+    }
 }

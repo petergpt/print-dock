@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-echo "==> swift build"
-swift build
+echo "==> swift build --product printdock"
+swift build --product printdock
+
+echo "==> swift build --product PrintDock"
+swift build --product PrintDock
 
 SDK_PATH=""
 if command -v xcrun >/dev/null 2>&1; then

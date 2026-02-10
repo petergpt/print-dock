@@ -25,6 +25,8 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
     private var paceMs: Int = 2
     private var isSending = false
     private var isFallbackScan = false
+    private var transferCompletedAt: Date?
+    private var sawPostTransferProcessing = false
 
     private let targetNamePrefix: String
     private let scanTimeout: TimeInterval = 12.0
@@ -91,8 +93,16 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         guard let peripheral, let writeChar else {
             return .rejected(reason: "Printer transport is not ready")
         }
-        guard !isSending else {
+        guard !isSending, transferCompletedAt == nil else {
             return .rejected(reason: "Another print is already in progress")
+        }
+        if let status = lastStatus {
+            if status.isIssueActive {
+                return .rejected(reason: "Printer needs attention: \(status.issueLabel)")
+            }
+            if status.isProcessingPrint {
+                return .rejected(reason: "Printer is busy (\(status.phaseLabel))")
+            }
         }
 
         let maxWriteLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
@@ -106,6 +116,8 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         pendingPackets = packets
         nextPacketIndex = 0
         isSending = true
+        transferCompletedAt = nil
+        sawPostTransferProcessing = false
         sendProgress = 0
         sendOutcome = nil
         lastEvent = "sending \(packets.count) packets"
@@ -182,6 +194,8 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         pendingPackets = []
         nextPacketIndex = 0
         isSending = false
+        transferCompletedAt = nil
+        sawPostTransferProcessing = false
         sendProgress = 0
     }
 
@@ -194,7 +208,7 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
     }
 
     private func failActiveSend(reason: String) {
-        guard isSending else { return }
+        guard isSending || transferCompletedAt != nil else { return }
         isSending = false
         sendTimer?.invalidate()
         sendTimer = nil
@@ -202,13 +216,15 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         sendTimeoutTimer = nil
         pendingPackets = []
         nextPacketIndex = 0
+        transferCompletedAt = nil
+        sawPostTransferProcessing = false
         sendProgress = 0
         sendOutcome = .failed(reason: reason)
         lastEvent = "send failed: \(reason)"
     }
 
     private func completeActiveSend() {
-        guard isSending else { return }
+        guard isSending || transferCompletedAt != nil else { return }
         isSending = false
         sendTimer?.invalidate()
         sendTimer = nil
@@ -216,9 +232,50 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         sendTimeoutTimer = nil
         pendingPackets = []
         nextPacketIndex = 0
+        transferCompletedAt = nil
+        sawPostTransferProcessing = false
         sendProgress = 1.0
         sendOutcome = .completed
         lastEvent = "send complete"
+    }
+
+    private func markPacketTransferComplete() {
+        guard isSending else { return }
+        isSending = false
+        sendTimer?.invalidate()
+        sendTimer = nil
+        pendingPackets = []
+        nextPacketIndex = 0
+        sendProgress = 1.0
+        transferCompletedAt = Date()
+        lastEvent = "packet transfer complete"
+        evaluateSendOutcomeFromStatus()
+    }
+
+    private func evaluateSendOutcomeFromStatus() {
+        guard let transferCompletedAt else { return }
+        guard sendOutcome == nil else { return }
+        guard let status = lastStatus, status.updatedAt >= transferCompletedAt else { return }
+
+        if status.isIssueActive {
+            failActiveSend(reason: "Printer needs attention: \(status.issueLabel)")
+            return
+        }
+
+        if status.isProcessingPrint {
+            sawPostTransferProcessing = true
+            lastEvent = "printer processing (\(status.phaseLabel))"
+            return
+        }
+
+        if status.isReadyForNextJob {
+            completeActiveSend()
+            return
+        }
+
+        if sawPostTransferProcessing {
+            lastEvent = "waiting for ready (\(status.phaseLabel))"
+        }
     }
 }
 
@@ -351,6 +408,7 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
         if let data = characteristic.value {
             lastStatus = PrinterStatus(raw: data)
             lastEvent = "status updated"
+            evaluateSendOutcomeFromStatus()
         }
     }
 
@@ -371,7 +429,7 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
         guard isSending else { return }
 
         if nextPacketIndex >= pendingPackets.count {
-            completeActiveSend()
+            markPacketTransferComplete()
             return
         }
 
@@ -386,7 +444,7 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
             }
 
             if nextPacketIndex >= pendingPackets.count {
-                completeActiveSend()
+                markPacketTransferComplete()
             }
             return
         }

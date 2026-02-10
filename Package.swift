@@ -29,12 +29,26 @@ let package = Package(
         .executableTarget(
             name: "PrintDockCLI",
             dependencies: ["PrintDockKit"],
-            path: "Sources/PrintDockCLI"
+            path: "Sources/PrintDockCLI",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/PrintDockCLI/Info.plist"
+                ])
+            ]
         ),
         .testTarget(
             name: "PrintDockKitTests",
             dependencies: ["PrintDockKit"],
             path: "Tests/PrintDockKitTests"
+        ),
+        .testTarget(
+            name: "PrintDockAppTests",
+            dependencies: ["PrintDockApp", "PrintDockKit"],
+            path: "Tests/PrintDockAppTests"
         )
     ]
 )

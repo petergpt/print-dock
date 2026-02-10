@@ -5,7 +5,7 @@ import PrintDockKit
 struct CLIOptions {
     var namePrefix: String = "Hi-Print"
     var timeout: TimeInterval = 12
-    var paceMs: Int = 2
+    var paceMs: Int = 12
 }
 
 enum Command {
@@ -85,12 +85,12 @@ func printUsage() {
     Usage:
       printdock scan [--prefix "Hi-Print"] [--timeout 12]
       printdock status [--prefix "Hi-Print"] [--timeout 12]
-      printdock print <imagePath> [--prefix "Hi-Print"] [--timeout 30] [--pace 2]
+      printdock print <imagePath> [--prefix "Hi-Print"] [--timeout 30] [--pace 12]
 
     Options:
       --prefix   Device name prefix to match (default: Hi-Print)
       --timeout  Seconds to wait for connect/finish (default: 12)
-      --pace     Milliseconds between BLE packets when printing (default: 2)
+      --pace     Milliseconds between BLE packets when printing (default: 12)
     """
     print(usage)
 }
@@ -119,6 +119,9 @@ func runStatus(options: CLIOptions) {
     let gotStatus = waitForStatus(client, timeout: options.timeout)
     if let status = client.lastStatus, gotStatus {
         print("STATUS \(status.rawHex)")
+        print("PHASE \(status.phaseCodeHex) \(status.phaseLabel)")
+        print("ISSUE \(status.issueCodeHex) \(status.issueLabel)")
+        print("READY \(status.isReadyForNextJob)")
         client.disconnect()
         exit(0)
     }
@@ -155,14 +158,23 @@ func runPrint(path: String, options: CLIOptions) {
         exit(1)
     }
 
-    client.send(jpeg: jpegData, paceMs: options.paceMs)
-    let completed = waitForPrint(client, timeout: max(options.timeout, 30))
+    let start = client.send(jpeg: jpegData, paceMs: options.paceMs, timeout: max(options.timeout, 90))
+    switch start {
+    case .started:
+        break
+    case .rejected(let reason):
+        printError("Print rejected: \(reason)")
+        client.disconnect()
+        exit(1)
+    }
+
+    let completed = waitForPrint(client, timeout: max(options.timeout, 90))
     if completed {
         print("PRINT_DONE")
         client.disconnect()
         exit(0)
     }
-    printError("Print timed out.")
+    printError("Print failed or timed out.")
     client.disconnect()
     exit(1)
 }
@@ -199,15 +211,28 @@ func waitForPrint(_ client: HiPrintBLEClient, timeout: TimeInterval) -> Bool {
     while Date() < deadline {
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
         if case .failed = client.connectionState { return false }
+
+        if let outcome = client.sendOutcome {
+            switch outcome {
+            case .completed:
+                return true
+            case .failed:
+                return false
+            }
+        }
+
         let progress = client.sendProgress
         let bucket = Int(progress * 10)
         if bucket != lastBucket {
             lastBucket = bucket
             print(String(format: "PROGRESS %d%%", min(100, bucket * 10)))
         }
-        if progress >= 1.0 { return true }
     }
-    return client.sendProgress >= 1.0
+
+    if let outcome = client.sendOutcome, case .completed = outcome {
+        return true
+    }
+    return false
 }
 
 func printError(_ message: String) {
