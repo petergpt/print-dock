@@ -2,6 +2,9 @@
 
 PrintDockKit provides the BLE connectivity layer for the Polaroid Hi·Print 2×3.
 
+For a detailed AI-agent handoff (state machine, packet protocol, failure signatures, and troubleshooting runbook), see:
+- `docs/agent-connectivity-deep-dive.md`
+
 ## Core API
 
 ```swift

@@ -10,6 +10,7 @@ This repo is intentionally split so each module can be used independently.
 Use **PrintDockKit** to discover/connect to the printer and send print jobs.
 
 - Docs: `docs/connectivity.md`
+- Deep technical handoff: `docs/agent-connectivity-deep-dive.md`
 - API entry point: `PrintDockKit/HiPrintBLEClient`
 - CLI docs: `docs/cli.md`
 
