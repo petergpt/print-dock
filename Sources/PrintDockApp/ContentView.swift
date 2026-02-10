@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 import PrintDockKit
 
 struct ContentView: View {
@@ -241,9 +242,23 @@ struct PileListView: View {
                             }
                         }
 
-                        if !pendingJobs.isEmpty {
+                        if !readyJobs.isEmpty {
                             SectionHeaderView(title: "Ready")
-                            ForEach(pendingJobs) { job in
+                            ForEach(readyJobs) { job in
+                                JobRowView(job: job)
+                            }
+                        }
+
+                        if !printingJobs.isEmpty {
+                            SectionHeaderView(title: "Printing")
+                            ForEach(printingJobs) { job in
+                                JobRowView(job: job)
+                            }
+                        }
+
+                        if !failedJobs.isEmpty {
+                            SectionHeaderView(title: "Needs Attention")
+                            ForEach(failedJobs) { job in
                                 JobRowView(job: job)
                             }
                         }
@@ -270,8 +285,16 @@ struct PileListView: View {
         model.queue.jobs.filter { $0.isFavorite }
     }
 
-    private var pendingJobs: [PrintJob] {
-        model.queue.jobs.filter { $0.state != .completed && !$0.isFavorite }
+    private var readyJobs: [PrintJob] {
+        model.queue.jobs.filter { $0.state == .queued && !$0.isFavorite }
+    }
+
+    private var printingJobs: [PrintJob] {
+        model.queue.jobs.filter { $0.state == .sending && !$0.isFavorite }
+    }
+
+    private var failedJobs: [PrintJob] {
+        model.queue.jobs.filter { $0.state == .failed && !$0.isFavorite }
     }
 
     private var printedJobs: [PrintJob] {
@@ -363,6 +386,9 @@ struct CanvasView: View {
     @State private var showImporter = false
     @State private var isHovering = false
     @State private var dragStart: CGSize? = nil
+    @State private var showCelebration = false
+    @State private var celebrationTrigger = 0
+    @State private var canvasGlow = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -414,6 +440,17 @@ struct CanvasView: View {
                     RoundedRectangle(cornerRadius: 22)
                         .stroke(isTargeted ? Theme.accent : Theme.border, lineWidth: isTargeted ? 2 : 1)
                 )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(Theme.accent.opacity(canvasGlow ? 0.55 : 0), lineWidth: canvasGlow ? 4 : 1)
+                )
+                .overlay {
+                    if showCelebration {
+                        CelebrationBurstView(trigger: celebrationTrigger)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                    }
+                }
                 .overlay(alignment: .topTrailing) {
                     if model.selectedImage != nil {
                         Button("Replace") { showImporter = true }
@@ -446,6 +483,9 @@ struct CanvasView: View {
                 if model.selectedImage == nil {
                     showImporter = true
                 }
+            }
+            .onChange(of: model.celebrationCount) { _ in
+                triggerCelebration()
             }
             .onDrop(of: [UTType.fileURL], isTargeted: $isTargeted) { providers in
                 guard let provider = providers.first else { return false }
@@ -488,10 +528,119 @@ struct CanvasView: View {
     private func fitFrame(in container: CGSize) -> CGSize {
         let inset: CGFloat = 36
         let available = CGSize(width: max(0, container.width - inset * 2), height: max(0, container.height - inset * 2))
-        let ratio: CGFloat = 2.0 / 3.0
+        let ratio = CGFloat(HiPrintConstants.imageWidth) / CGFloat(HiPrintConstants.imageHeight)
         let width = min(available.width, available.height * ratio)
         let height = width / ratio
         return CGSize(width: width, height: height)
+    }
+
+    private func triggerCelebration() {
+        guard model.celebrationCount > 0 else { return }
+        celebrationTrigger += 1
+        showCelebration = true
+        withAnimation(.easeOut(duration: 0.3)) {
+            canvasGlow = true
+        }
+
+        if let sound = NSSound(named: NSSound.Name("Glass")) {
+            sound.play()
+        } else {
+            NSSound.beep()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+            withAnimation(.easeOut(duration: 0.25)) {
+                canvasGlow = false
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            withAnimation(.easeOut(duration: 0.25)) {
+                showCelebration = false
+            }
+        }
+    }
+}
+
+struct CelebrationBurstView: View {
+    let trigger: Int
+
+    private enum Corner: Int, CaseIterable {
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+
+        var direction: CGSize {
+            switch self {
+            case .topLeft: return CGSize(width: 1, height: 1)
+            case .topRight: return CGSize(width: -1, height: 1)
+            case .bottomLeft: return CGSize(width: 1, height: -1)
+            case .bottomRight: return CGSize(width: -1, height: -1)
+            }
+        }
+    }
+
+    private let colors: [Color] = [
+        Color(red: 1.0, green: 0.86, blue: 0.20),
+        Color(red: 0.98, green: 0.35, blue: 0.45),
+        Color(red: 0.22, green: 0.78, blue: 0.82),
+        Color(red: 1.0, green: 0.62, blue: 0.18)
+    ]
+
+    @State private var exploded = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                ForEach(Corner.allCases, id: \.rawValue) { corner in
+                    ForEach(0..<10, id: \.self) { idx in
+                        Capsule()
+                            .fill(colors[(idx + corner.rawValue) % colors.count])
+                            .frame(width: CGFloat(4 + (idx % 3)), height: CGFloat(10 + (idx % 5)))
+                            .position(startPosition(for: corner, in: proxy.size))
+                            .offset(exploded ? burstOffset(for: corner, index: idx) : .zero)
+                            .rotationEffect(.degrees(exploded ? Double(idx * 31) : 0))
+                            .opacity(exploded ? 0 : 0.95)
+                    }
+                }
+            }
+            .onAppear { restart() }
+            .onChange(of: trigger) { _ in restart() }
+        }
+    }
+
+    private func startPosition(for corner: Corner, in size: CGSize) -> CGPoint {
+        let inset: CGFloat = 20
+        switch corner {
+        case .topLeft:
+            return CGPoint(x: inset, y: inset)
+        case .topRight:
+            return CGPoint(x: size.width - inset, y: inset)
+        case .bottomLeft:
+            return CGPoint(x: inset, y: size.height - inset)
+        case .bottomRight:
+            return CGPoint(x: size.width - inset, y: size.height - inset)
+        }
+    }
+
+    private func burstOffset(for corner: Corner, index: Int) -> CGSize {
+        let direction = corner.direction
+        let distance = CGFloat(28 + ((index * 13) % 48))
+        let lateral = CGFloat((index % 5) - 2) * 8
+
+        let x = direction.width * distance - direction.height * lateral
+        let y = direction.height * distance + direction.width * lateral
+        return CGSize(width: x, height: y)
+    }
+
+    private func restart() {
+        exploded = false
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.9)) {
+                exploded = true
+            }
+        }
     }
 }
 

@@ -10,20 +10,36 @@ final class AppModel: ObservableObject {
     @Published var placement = Placement()
     @Published var selectedJobID: UUID?
     @Published var lastError: String?
+    @Published private(set) var celebrationCount: Int = 0
 
-    let printer = PrinterController()
-    let queue = PrintQueue()
-    private let pipeline = ImagePipeline()
+    let printer: PrinterController
+    let queue: PrintQueue
+    private let pipeline: ImagePipeline
     private let ciContext = CIContext(options: nil)
-    private let paceMs: Int = 2
-    private let jpegQuality: Double = 0.98
+    private let paceMs: Int
+    private let jpegQuality: Double
+    private let sendTimeout: TimeInterval
 
     private var cancellables: Set<AnyCancellable> = []
     private var pendingJobs: [UUID] = []
     private var payloads: [UUID: Data] = [:]
     private var currentJob: UUID?
 
-    init() {
+    init(
+        printer: PrinterController = PrinterController(),
+        queue: PrintQueue = PrintQueue(),
+        pipeline: ImagePipeline = ImagePipeline(),
+        paceMs: Int = 2,
+        jpegQuality: Double = 0.98,
+        sendTimeout: TimeInterval = 90
+    ) {
+        self.printer = printer
+        self.queue = queue
+        self.pipeline = pipeline
+        self.paceMs = paceMs
+        self.jpegQuality = jpegQuality
+        self.sendTimeout = sendTimeout
+
         printer.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -34,6 +50,13 @@ final class AppModel: ObservableObject {
         printer.$sendProgress
             .sink { [weak self] progress in
                 self?.handleProgress(progress)
+            }
+            .store(in: &cancellables)
+
+        printer.$sendOutcome
+            .compactMap { $0 }
+            .sink { [weak self] outcome in
+                self?.handleSendOutcome(outcome)
             }
             .store(in: &cancellables)
     }
@@ -65,9 +88,7 @@ final class AppModel: ObservableObject {
             payloads[id] = data
             pendingJobs.append(id)
 
-            if currentJob == nil {
-                sendNext()
-            }
+            sendNextIfNeeded()
         } catch {
             lastError = error.localizedDescription
         }
@@ -132,27 +153,51 @@ final class AppModel: ObservableObject {
         placement = next
     }
 
-    private func sendNext() {
-        guard !pendingJobs.isEmpty else {
-            currentJob = nil
-            return
-        }
-        currentJob = pendingJobs.removeFirst()
-        if let id = currentJob, let payload = payloads[id] {
-            queue.update(id, state: .sending, progress: 0)
-            printer.send(jpeg: payload, paceMs: paceMs)
+    private func sendNextIfNeeded() {
+        guard currentJob == nil else { return }
+
+        while !pendingJobs.isEmpty {
+            let id = pendingJobs.removeFirst()
+            guard let payload = payloads[id] else {
+                queue.update(id, state: .failed, progress: 0, error: "Missing print payload")
+                continue
+            }
+
+            currentJob = id
+            queue.update(id, state: .sending, progress: 0, clearError: true)
+            let result = printer.send(jpeg: payload, paceMs: paceMs, timeout: sendTimeout)
+            switch result {
+            case .started:
+                return
+            case .rejected(let reason):
+                queue.update(id, state: .failed, progress: 0, error: reason)
+                payloads.removeValue(forKey: id)
+                currentJob = nil
+                lastError = reason
+            }
         }
     }
 
     private func handleProgress(_ progress: Double) {
         guard let id = currentJob else { return }
         queue.update(id, state: .sending, progress: progress)
-        if progress >= 1.0 {
+    }
+
+    private func handleSendOutcome(_ outcome: SendOutcome) {
+        guard let id = currentJob else { return }
+
+        switch outcome {
+        case .completed:
             queue.update(id, state: .completed, progress: 1.0)
-            payloads.removeValue(forKey: id)
-            currentJob = nil
-            sendNext()
+            celebrationCount += 1
+        case .failed(let reason):
+            queue.update(id, state: .failed, progress: 0, error: reason)
+            lastError = reason
         }
+
+        payloads.removeValue(forKey: id)
+        currentJob = nil
+        sendNextIfNeeded()
     }
 
     private func offsetForPrint(image: NSImage) -> CGSize {
