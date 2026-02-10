@@ -85,11 +85,11 @@ func printUsage() {
     Usage:
       printdock scan [--prefix "Hi-Print"] [--timeout 12]
       printdock status [--prefix "Hi-Print"] [--timeout 12]
-      printdock print <imagePath> [--prefix "Hi-Print"] [--timeout 30] [--pace 12]
+      printdock print <imagePath> [--prefix "Hi-Print"] [--timeout 12] [--pace 12]
 
     Options:
       --prefix   Device name prefix to match (default: Hi-Print)
-      --timeout  Seconds to wait for connect/finish (default: 12)
+      --timeout  Seconds to wait for connect/status (default: 12; print completion waits at least 90)
       --pace     Milliseconds between BLE packets when printing (default: 12)
     """
     print(usage)

@@ -168,12 +168,15 @@ PY
 run_printdock_via_app_wrapper() {
   local wrapper_app="$OUT_DIR/printdock-cli.app"
   local wrapper_bin="$wrapper_app/Contents/MacOS/printdock"
-  local built_bin="$PRINTDOCK_PATH/.build/arm64-apple-macosx/debug/printdock"
+  local bin_path
+  local built_bin
   local stdout_log="$OUT_DIR/printdock.stdout.log"
   local stderr_log="$OUT_DIR/printdock.stderr.log"
   local cmd="${1:-}"
 
   swift build --package-path "$PRINTDOCK_PATH" --product printdock >/dev/null
+  bin_path="$(swift build --package-path "$PRINTDOCK_PATH" --show-bin-path)"
+  built_bin="$bin_path/printdock"
 
   if [[ ! -f "$built_bin" ]]; then
     echo "Could not find built printdock binary: $built_bin" >&2

@@ -140,6 +140,11 @@ Pre-send rejection conditions:
 - Last status reports active issue
 - Last status reports printer busy/processing
 
+Current behavior note:
+
+- If `lastStatus` is still `nil` right after connect, send is allowed to start.
+- Readiness is then enforced in the post-transfer phase (issue/fault still fails), but this can delay failure feedback.
+
 Transfer phase:
 
 1. Build packet list, set `isSending = true`, `sendOutcome = nil`, `sendProgress = 0`.
@@ -282,4 +287,3 @@ When changing packet framing:
 1. Update `HiPrintPacketizer`.
 2. Update `Tests/PrintDockKitTests/PacketizerTests.swift`.
 3. Validate against printer behavior with one controlled real print.
-
