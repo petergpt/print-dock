@@ -1,0 +1,4 @@
+interface:
+  display_name: "Surprise Print"
+  short_description: "Research upbeat news, generate playful art, and print a surprise mini-poster."
+  default_prompt: "Create one upbeat surprise print from today's news with a fun, optimistic visual style and print it to Hi-Print."

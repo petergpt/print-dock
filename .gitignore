@@ -4,6 +4,7 @@
 !.env.example
 /dist
 /outputs
+/skills/surprise-print/output/
 /cache
 /.cache
 /.build
