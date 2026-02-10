@@ -181,6 +181,13 @@ final class AppModel: ObservableObject {
     private func handleProgress(_ progress: Double) {
         guard let id = currentJob else { return }
         queue.update(id, state: .sending, progress: progress)
+        guard progress >= 1.0 else { return }
+
+        queue.update(id, state: .completed, progress: 1.0)
+        celebrationCount += 1
+        payloads.removeValue(forKey: id)
+        currentJob = nil
+        sendNextIfNeeded()
     }
 
     private func handleSendOutcome(_ outcome: SendOutcome) {

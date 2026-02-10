@@ -6,6 +6,7 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
     @Published public private(set) var connectionState: ConnectionState = .idle
     @Published public private(set) var lastStatus: PrinterStatus?
     @Published public private(set) var sendProgress: Double = 0
+    @Published public private(set) var sendOutcome: SendOutcome?
     @Published public private(set) var deviceName: String?
     @Published public private(set) var lastEvent: String = "idle"
 
@@ -14,18 +15,30 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
     private var writeChar: CBCharacteristic?
     private var readChar: CBCharacteristic?
     private var statusTimer: Timer?
-    private var scanTimer: Timer?
+    private var scanTimeoutTimer: Timer?
+    private var scanFallbackTimer: Timer?
     private var sendTimer: Timer?
+    private var sendTimeoutTimer: Timer?
 
     private var pendingPackets: [Data] = []
     private var nextPacketIndex = 0
     private var paceMs: Int = 2
     private var isSending = false
+    private var isFallbackScan = false
 
     private let targetNamePrefix: String
+    private let scanTimeout: TimeInterval = 12.0
+    private let filteredScanWindow: TimeInterval = 4.0
+    private let preferredPeripheralKey: String
+    private var preferredPeripheralID: UUID?
 
     public init(targetNamePrefix: String = "Hi-Print") {
         self.targetNamePrefix = targetNamePrefix
+        self.preferredPeripheralKey = "PrintDock.PreferredPeripheral.\(targetNamePrefix.lowercased())"
+        if let saved = UserDefaults.standard.string(forKey: preferredPeripheralKey),
+           let id = UUID(uuidString: saved) {
+            self.preferredPeripheralID = id
+        }
         super.init()
         self.central = CBCentralManager(delegate: self, queue: nil)
     }
@@ -42,6 +55,14 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         $sendProgress.eraseToAnyPublisher()
     }
 
+    public var sendOutcomePublisher: AnyPublisher<SendOutcome?, Never> {
+        $sendOutcome.eraseToAnyPublisher()
+    }
+
+    public var lastEventPublisher: AnyPublisher<String, Never> {
+        $lastEvent.eraseToAnyPublisher()
+    }
+
     public func connect() {
         lastEvent = "connect requested"
         if central.state == .poweredOn {
@@ -52,29 +73,84 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
     }
 
     public func disconnect() {
+        failActiveSend(reason: "Disconnected")
         if let peripheral { central.cancelPeripheralConnection(peripheral) }
         cleanup()
         connectionState = .disconnected
         lastEvent = "disconnected"
     }
 
-    public func send(jpeg: Data, paceMs: Int = 2) {
-        guard let peripheral, let writeChar else { return }
+    @discardableResult
+    public func send(jpeg: Data, paceMs: Int = 2, timeout: TimeInterval = 90) -> SendStartResult {
+        guard !jpeg.isEmpty else {
+            return .rejected(reason: "Image data is empty")
+        }
+        guard case .connected = connectionState else {
+            return .rejected(reason: "Printer is not connected")
+        }
+        guard let peripheral, let writeChar else {
+            return .rejected(reason: "Printer transport is not ready")
+        }
+        guard !isSending else {
+            return .rejected(reason: "Another print is already in progress")
+        }
+
+        let maxWriteLength = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        let maxDataBytes = max(1, min(200, maxWriteLength - 5))
+        guard maxWriteLength > 5 else {
+            return .rejected(reason: "BLE write MTU too small")
+        }
+
         self.paceMs = max(0, paceMs)
-        let packets = HiPrintPacketizer.packetize(payload: jpeg)
+        let packets = HiPrintPacketizer.packetize(payload: jpeg, maxDataBytes: maxDataBytes)
         pendingPackets = packets
         nextPacketIndex = 0
         isSending = true
         sendProgress = 0
+        sendOutcome = nil
+        lastEvent = "sending \(packets.count) packets"
+
+        scheduleSendTimeout(seconds: timeout)
         sendNext(peripheral: peripheral, writeChar: writeChar)
+        return .started
     }
 
     private func startScan() {
+        cleanupScanState()
         connectionState = .scanning
-        lastEvent = "scan started"
-        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-        scanTimer?.invalidate()
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+
+        if let preferredPeripheralID,
+           let known = central.retrievePeripherals(withIdentifiers: [preferredPeripheralID]).first {
+            peripheral = known
+            deviceName = known.name
+            connectionState = .connecting
+            lastEvent = "reconnecting known device"
+            central.connect(known, options: nil)
+            return
+        }
+
+        lastEvent = "scan started (service filter)"
+        isFallbackScan = false
+        central.scanForPeripherals(
+            withServices: [HiPrintConstants.serviceUUID()],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+
+        scanFallbackTimer = Timer.scheduledTimer(withTimeInterval: filteredScanWindow, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            guard case .scanning = self.connectionState else { return }
+            guard self.peripheral == nil else { return }
+
+            self.central.stopScan()
+            self.isFallbackScan = true
+            self.lastEvent = "scan fallback (name match)"
+            self.central.scanForPeripherals(
+                withServices: nil,
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+            )
+        }
+
+        scanTimeoutTimer = Timer.scheduledTimer(withTimeInterval: scanTimeout, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.central.stopScan()
             if case .scanning = self.connectionState {
@@ -84,21 +160,66 @@ public final class HiPrintBLEClient: NSObject, ObservableObject {
         }
     }
 
+    private func cleanupScanState() {
+        scanTimeoutTimer?.invalidate()
+        scanTimeoutTimer = nil
+        scanFallbackTimer?.invalidate()
+        scanFallbackTimer = nil
+        isFallbackScan = false
+    }
+
     private func cleanup() {
         statusTimer?.invalidate()
         statusTimer = nil
-        scanTimer?.invalidate()
-        scanTimer = nil
+        cleanupScanState()
         sendTimer?.invalidate()
         sendTimer = nil
+        sendTimeoutTimer?.invalidate()
+        sendTimeoutTimer = nil
         writeChar = nil
         readChar = nil
         peripheral = nil
         pendingPackets = []
         nextPacketIndex = 0
         isSending = false
+        sendProgress = 0
     }
 
+    private func scheduleSendTimeout(seconds: TimeInterval) {
+        sendTimeoutTimer?.invalidate()
+        sendTimeoutTimer = Timer.scheduledTimer(withTimeInterval: max(1, seconds), repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.failActiveSend(reason: "Send timed out")
+        }
+    }
+
+    private func failActiveSend(reason: String) {
+        guard isSending else { return }
+        isSending = false
+        sendTimer?.invalidate()
+        sendTimer = nil
+        sendTimeoutTimer?.invalidate()
+        sendTimeoutTimer = nil
+        pendingPackets = []
+        nextPacketIndex = 0
+        sendProgress = 0
+        sendOutcome = .failed(reason: reason)
+        lastEvent = "send failed: \(reason)"
+    }
+
+    private func completeActiveSend() {
+        guard isSending else { return }
+        isSending = false
+        sendTimer?.invalidate()
+        sendTimer = nil
+        sendTimeoutTimer?.invalidate()
+        sendTimeoutTimer = nil
+        pendingPackets = []
+        nextPacketIndex = 0
+        sendProgress = 1.0
+        sendOutcome = .completed
+        lastEvent = "send complete"
+    }
 }
 
 extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -108,12 +229,18 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
             lastEvent = "bluetooth on"
             if case .connecting = connectionState { startScan() }
         case .unauthorized:
+            failActiveSend(reason: "Bluetooth unauthorized")
+            cleanup()
             connectionState = .failed(reason: "Bluetooth unauthorized")
             lastEvent = "bluetooth unauthorized"
         case .poweredOff:
+            failActiveSend(reason: "Bluetooth powered off")
+            cleanup()
             connectionState = .failed(reason: "Bluetooth powered off")
             lastEvent = "bluetooth off"
         case .unsupported:
+            failActiveSend(reason: "Bluetooth unsupported")
+            cleanup()
             connectionState = .failed(reason: "Bluetooth unsupported")
             lastEvent = "bluetooth unsupported"
         default:
@@ -124,31 +251,43 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advName ?? ""
-        if name.localizedCaseInsensitiveContains(targetNamePrefix) {
-            self.peripheral = peripheral
-            self.deviceName = name
-            central.stopScan()
-            scanTimer?.invalidate()
-            connectionState = .connecting
-            lastEvent = "found \(name)"
-            central.connect(peripheral, options: nil)
-        }
+
+        let nameMatch = name.localizedCaseInsensitiveContains(targetNamePrefix)
+        let knownMatch = preferredPeripheralID != nil && peripheral.identifier == preferredPeripheralID
+        let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let serviceMatch = advertisedServices.contains(HiPrintConstants.serviceUUID())
+
+        let shouldConnect = knownMatch || nameMatch || (!isFallbackScan && serviceMatch)
+        guard shouldConnect else { return }
+
+        self.peripheral = peripheral
+        self.deviceName = name.isEmpty ? nil : name
+        central.stopScan()
+        cleanupScanState()
+        connectionState = .connecting
+        lastEvent = "found \(name.isEmpty ? peripheral.identifier.uuidString : name)"
+        central.connect(peripheral, options: nil)
     }
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        connectionState = .connected(name: deviceName)
-        lastEvent = "connected"
+        preferredPeripheralID = peripheral.identifier
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: preferredPeripheralKey)
+
+        connectionState = .connecting
+        lastEvent = "connected, discovering services"
         peripheral.delegate = self
         peripheral.discoverServices([HiPrintConstants.serviceUUID()])
-        startStatusPolling()
     }
 
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        failActiveSend(reason: "Failed to connect")
         connectionState = .failed(reason: error?.localizedDescription ?? "Failed to connect")
         lastEvent = "connect failed"
+        cleanup()
     }
 
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        failActiveSend(reason: error?.localizedDescription ?? "Disconnected")
         cleanup()
         connectionState = .disconnected
         lastEvent = "disconnected"
@@ -158,31 +297,57 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
         if let error {
             connectionState = .failed(reason: error.localizedDescription)
             lastEvent = "service discovery failed"
+            central.cancelPeripheralConnection(peripheral)
             return
         }
-        guard let services = peripheral.services else { return }
-        for s in services where s.uuid == HiPrintConstants.serviceUUID() {
-            lastEvent = "service discovered"
-            peripheral.discoverCharacteristics([HiPrintConstants.writeUUID(), HiPrintConstants.readUUID()], for: s)
+
+        guard let service = peripheral.services?.first(where: { $0.uuid == HiPrintConstants.serviceUUID() }) else {
+            connectionState = .failed(reason: "Printer service not found")
+            lastEvent = "service missing"
+            central.cancelPeripheralConnection(peripheral)
+            return
         }
+
+        lastEvent = "service discovered"
+        peripheral.discoverCharacteristics([HiPrintConstants.writeUUID(), HiPrintConstants.readUUID()], for: service)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error {
             connectionState = .failed(reason: error.localizedDescription)
             lastEvent = "characteristics failed"
+            central.cancelPeripheralConnection(peripheral)
             return
         }
+
+        var discoveredWrite: CBCharacteristic?
+        var discoveredRead: CBCharacteristic?
         for c in service.characteristics ?? [] {
-            if c.uuid == HiPrintConstants.writeUUID() { writeChar = c }
-            if c.uuid == HiPrintConstants.readUUID() { readChar = c }
+            if c.uuid == HiPrintConstants.writeUUID() { discoveredWrite = c }
+            if c.uuid == HiPrintConstants.readUUID() { discoveredRead = c }
         }
-        if writeChar != nil && readChar != nil {
-            lastEvent = "characteristics ready"
+
+        guard let discoveredWrite, let discoveredRead else {
+            connectionState = .failed(reason: "Printer characteristics missing")
+            lastEvent = "characteristics missing"
+            central.cancelPeripheralConnection(peripheral)
+            return
         }
+
+        writeChar = discoveredWrite
+        readChar = discoveredRead
+        connectionState = .connected(name: deviceName)
+        lastEvent = "characteristics ready"
+
+        startStatusPolling()
+        peripheral.readValue(for: discoveredRead)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error {
+            lastEvent = "status read failed: \(error.localizedDescription)"
+            return
+        }
         if let data = characteristic.value {
             lastStatus = PrinterStatus(raw: data)
             lastEvent = "status updated"
@@ -204,13 +369,27 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func sendNext(peripheral: CBPeripheral, writeChar: CBCharacteristic) {
         guard isSending else { return }
+
         if nextPacketIndex >= pendingPackets.count {
-            isSending = false
-            sendProgress = 1.0
+            completeActiveSend()
             return
         }
 
         guard peripheral.canSendWriteWithoutResponse else { return }
+
+        if paceMs <= 0 {
+            while isSending && nextPacketIndex < pendingPackets.count && peripheral.canSendWriteWithoutResponse {
+                let packet = pendingPackets[nextPacketIndex]
+                peripheral.writeValue(packet, for: writeChar, type: .withoutResponse)
+                nextPacketIndex += 1
+                sendProgress = Double(nextPacketIndex) / Double(max(1, pendingPackets.count))
+            }
+
+            if nextPacketIndex >= pendingPackets.count {
+                completeActiveSend()
+            }
+            return
+        }
 
         let packet = pendingPackets[nextPacketIndex]
         peripheral.writeValue(packet, for: writeChar, type: .withoutResponse)
@@ -219,7 +398,7 @@ extension HiPrintBLEClient: CBCentralManagerDelegate, CBPeripheralDelegate {
 
         sendTimer?.invalidate()
         let interval = Double(paceMs) / 1000.0
-        sendTimer = Timer.scheduledTimer(withTimeInterval: max(0.0, interval), repeats: false) { [weak self] _ in
+        sendTimer = Timer.scheduledTimer(withTimeInterval: max(0.001, interval), repeats: false) { [weak self] _ in
             guard let self, let p = self.peripheral, let w = self.writeChar else { return }
             self.sendNext(peripheral: p, writeChar: w)
         }

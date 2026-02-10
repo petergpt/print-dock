@@ -1,0 +1,1 @@
+Resource placeholder for SwiftPM app bundle.

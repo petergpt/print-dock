@@ -22,3 +22,13 @@ public enum ConnectionState: Equatable {
     case disconnected
     case failed(reason: String)
 }
+
+public enum SendStartResult: Equatable {
+    case started
+    case rejected(reason: String)
+}
+
+public enum SendOutcome: Equatable {
+    case completed
+    case failed(reason: String)
+}

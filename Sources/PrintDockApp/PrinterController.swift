@@ -2,17 +2,32 @@ import Foundation
 import Combine
 import PrintDockKit
 
+protocol HiPrintClienting: AnyObject {
+    var connectionStatePublisher: AnyPublisher<ConnectionState, Never> { get }
+    var lastStatusPublisher: AnyPublisher<PrinterStatus?, Never> { get }
+    var sendProgressPublisher: AnyPublisher<Double, Never> { get }
+    var sendOutcomePublisher: AnyPublisher<SendOutcome?, Never> { get }
+    var lastEventPublisher: AnyPublisher<String, Never> { get }
+
+    func connect()
+    func disconnect()
+    func send(jpeg: Data, paceMs: Int, timeout: TimeInterval) -> SendStartResult
+}
+
+extension HiPrintBLEClient: HiPrintClienting {}
+
 final class PrinterController: ObservableObject {
     @Published private(set) var connectionState: ConnectionState = .idle
     @Published private(set) var lastStatus: PrinterStatus?
     @Published private(set) var sendProgress: Double = 0
+    @Published private(set) var sendOutcome: SendOutcome?
     @Published private(set) var lastEvent: String = ""
 
-    private let client: HiPrintBLEClient
+    private let client: any HiPrintClienting
     private var cancellables: Set<AnyCancellable> = []
 
-    init() {
-        self.client = HiPrintBLEClient()
+    init(client: any HiPrintClienting = HiPrintBLEClient()) {
+        self.client = client
         bind()
     }
 
@@ -30,7 +45,11 @@ final class PrinterController: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.sendProgress = $0 }
             .store(in: &cancellables)
-        client.$lastEvent
+        client.sendOutcomePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.sendOutcome = $0 }
+            .store(in: &cancellables)
+        client.lastEventPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.lastEvent = $0 }
             .store(in: &cancellables)
@@ -38,5 +57,7 @@ final class PrinterController: ObservableObject {
 
     func connect() { client.connect() }
     func disconnect() { client.disconnect() }
-    func send(jpeg: Data, paceMs: Int) { client.send(jpeg: jpeg, paceMs: paceMs) }
+    func send(jpeg: Data, paceMs: Int, timeout: TimeInterval) -> SendStartResult {
+        client.send(jpeg: jpeg, paceMs: paceMs, timeout: timeout)
+    }
 }
