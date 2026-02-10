@@ -29,7 +29,7 @@ final class AppModel: ObservableObject {
         printer: PrinterController = PrinterController(),
         queue: PrintQueue = PrintQueue(),
         pipeline: ImagePipeline = ImagePipeline(),
-        paceMs: Int = 2,
+        paceMs: Int = 12,
         jpegQuality: Double = 0.98,
         sendTimeout: TimeInterval = 90
     ) {
@@ -181,13 +181,6 @@ final class AppModel: ObservableObject {
     private func handleProgress(_ progress: Double) {
         guard let id = currentJob else { return }
         queue.update(id, state: .sending, progress: progress)
-        guard progress >= 1.0 else { return }
-
-        queue.update(id, state: .completed, progress: 1.0)
-        celebrationCount += 1
-        payloads.removeValue(forKey: id)
-        currentJob = nil
-        sendNextIfNeeded()
     }
 
     private func handleSendOutcome(_ outcome: SendOutcome) {

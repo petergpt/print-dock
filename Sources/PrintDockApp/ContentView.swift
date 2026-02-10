@@ -193,7 +193,17 @@ struct DeviceCardView: View {
 
     private var statusLine: String {
         switch model.printer.connectionState {
-        case .connected: return "Ready to print"
+        case .connected:
+            guard let status = model.printer.lastStatus else {
+                return "Connected"
+            }
+            if status.isIssueActive {
+                return "Attention needed: \(status.issueLabel)"
+            }
+            if status.isReadyForNextJob {
+                return "Ready to print"
+            }
+            return "Printer \(status.phaseLabel)"
         case .connecting: return "Pairing"
         case .scanning: return "Searching"
         case .failed: return "Connection issue"

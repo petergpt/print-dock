@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-swift build -c release
+swift build -c release --product PrintDock
 
 APP_DIR="$ROOT/dist/PrintDock.app"
 BIN="$ROOT/.build/release/PrintDock"
